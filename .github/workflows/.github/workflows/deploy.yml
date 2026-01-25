@@ -1,0 +1,51 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+      confirm:
+        description: "Type DEPLOY to confirm"
+        required: true
+        type: string
+
+concurrency:
+  group: deploy-${{ inputs.environment }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: Deploy gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirm
+        run: |
+          if [ "${{ inputs.confirm }}" != "DEPLOY" ]; then
+            echo "Confirmation failed. Type DEPLOY to proceed."
+            exit 1
+          fi
+
+  deploy:
+    name: Deploy to ${{ inputs.environment }}
+    needs: gate
+    runs-on: [self-hosted, Linux, X64, deteng-runner-1]
+    environment: ${{ inputs.environment }}
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy placeholder
+        run: |
+          echo "Deploying to: ${{ inputs.environment }}"
+          echo "Put your real deploy steps here (Ansible, Docker, Terraform, etc.)"
