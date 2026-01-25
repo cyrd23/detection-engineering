@@ -1,0 +1,23 @@
+name: Runner smoke test
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  smoke:
+    runs-on: [self-hosted, Linux, X64, deteng-runner-1]
+
+    steps:
+      - name: Basic info
+        run: |
+          echo "Hello from self-hosted runner!"
+          whoami
+          hostname
+          uname -a
+
+      - uses: actions/checkout@v4
+
+      - name: List repo files
+        run: ls -la
