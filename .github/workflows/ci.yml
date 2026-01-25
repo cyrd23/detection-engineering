@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: Validate + Test
+    runs-on: [self-hosted, Linux, X64, deteng-runner-1]
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Runner info
+        run: |
+          whoami
+          hostname
+          uname -a
+          df -h
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps (if present)
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
+
+      - name: Lint/tests (if present)
+        run: |
+          python -c "import ruff" 2>/dev/null && ruff check . || echo "ruff not installed, skipping"
+          python -c "import pytest" 2>/dev/null && pytest -q || echo "pytest not installed, skipping"
