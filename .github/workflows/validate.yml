@@ -1,0 +1,30 @@
+name: Validate Detections
+
+on:
+  push:
+    paths:
+      - "detections/**"
+      - "pipelines/**"
+      - ".github/workflows/validate.yml"
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: [self-hosted, Linux, X64, deteng-runner-1]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install python deps
+        run: |
+          python3 -V
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r pipelines/requirements.txt
+
+      - name: Validate fields exist in Elasticsearch
+        env:
+          ELASTIC_URL: ${{ secrets.ELASTIC_URL }}
+          ELASTIC_USERNAME: ${{ secrets.ELASTIC_USERNAME }}
+          ELASTIC_PASSWORD: ${{ secrets.ELASTIC_PASSWORD }}
+        run: |
+          python3 pipelines/validate_fields.py
+YAML

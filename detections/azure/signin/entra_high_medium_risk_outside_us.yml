@@ -1,0 +1,20 @@
+title: Entra ID High or Medium Risk Sign-in Outside US
+id: 00000000-0000-0000-0000-000000000001
+status: experimental
+description: Detects risky Entra sign-ins (medium/high) outside the US.
+author: reg
+date: 2026-01-26
+logsource:
+  product: azure
+  service: signinlogs
+detection:
+  selection:
+    azure.signinlogs.properties.risk_level_aggregated:
+      - medium
+      - high
+  filter_geo:
+    source.geo.country_iso_code: US
+  condition: selection and not filter_geo
+level: high
+tags:
+  - attack.t1078
