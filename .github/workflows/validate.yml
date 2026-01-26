@@ -2,12 +2,22 @@ name: Validate Detections
 
 on:
   push:
-    branches: [ main ]
+    paths:
+      - "detections/**"
+      - "pipelines/**"
+      - ".github/workflows/validate.yml"
   workflow_dispatch:
 
 jobs:
   validate:
-    runs-on: [self-hosted, deteng-runner-1]
+    runs-on: [self-hosted, Linux, X64]
+
+    env:
+      ES_URL: ${{ secrets.ELASTICSEARCH_URL }}
+      ES_USERNAME: ${{ secrets.ELASTIC_USERNAME }}
+      ES_PASSWORD: ${{ secrets.ELASTIC_PASSWORD }}
+      KIBANA_URL: ${{ secrets.KIBANA_URL }}
+      KIBANA_SPACE: ${{ secrets.KIBANA_SPACE }}
 
     steps:
       - name: Checkout
@@ -16,7 +26,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.11"
 
       - name: Bootstrap pip + install deps
         run: |
@@ -24,30 +34,24 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r pipelines/requirements.txt
 
-      # 👉 Field validation
+      # ---- FIELD VALIDATION ----
+
       - name: Validate fields exist in Elasticsearch (staging)
-        env:
-          ES_URL: ${{ secrets.STAGING_ES_URL }}
-          ES_USERNAME: ${{ secrets.STAGING_ES_USERNAME }}
-          ES_PASSWORD: ${{ secrets.STAGING_ES_PASSWORD }}
-          KIBANA_SPACE: detections-staging
         run: |
           python pipelines/validate_fields.py \
             --rule detections/entra/entra_risk_outside_us.yml \
-            --es-url $ES_URL \
-            --username $ES_USERNAME \
-            --password $ES_PASSWORD \
-            --kibana-space $KIBANA_SPACE
+            --es-url "$ES_URL" \
+            --username "$ES_USERNAME" \
+            --password "$ES_PASSWORD" \
+            --kibana-url "$KIBANA_URL" \
+            --kibana-space "$KIBANA_SPACE"
 
-      # 👉 Query dry-run
+      # ---- QUERY DRY RUN ----
+
       - name: Dry-run detection queries (staging)
-        env:
-          ES_URL: ${{ secrets.STAGING_ES_URL }}
-          ES_USERNAME: ${{ secrets.STAGING_ES_USERNAME }}
-          ES_PASSWORD: ${{ secrets.STAGING_ES_PASSWORD }}
         run: |
           python pipelines/dry_run_detection.py \
             --rule detections/entra/entra_risk_outside_us.yml \
-            --es-url $ES_URL \
-            --username $ES_USERNAME \
-            --password $ES_PASSWORD
+            --es-url "$ES_URL" \
+            --username "$ES_USERNAME" \
+            --password "$ES_PASSWORD"
