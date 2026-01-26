@@ -6,13 +6,15 @@ on:
     paths:
       - "detections/**"
       - "pipelines/**"
+      - ".github/workflows/validate.yml"
 
 jobs:
   validate:
-    runs-on: self-hosted
+    runs-on: [self-hosted, Linux, X64, deteng-runner-1]
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -21,6 +23,7 @@ jobs:
 
       - name: Install deps
         run: |
+          python -m pip install --upgrade pip
           pip install pyyaml requests
 
       - name: Validate fields against Elasticsearch
