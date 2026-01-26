@@ -1,0 +1,13 @@
+title: Entra ID High or Medium Risk Sign-in Outside US
+logsource:
+  product: azure
+  service: signinlogs
+detection:
+  selection:
+    azure.signinlogs.properties.risk_level_aggregated:
+      - medium
+      - high
+  filter_geo:
+    source.geo.country_iso_code: US
+  condition: selection and not filter_geo
+level: high

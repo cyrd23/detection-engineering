@@ -1,35 +1,46 @@
 name: Validate Detections
 
 on:
-  workflow_dispatch:
   push:
     paths:
       - "detections/**"
       - "pipelines/**"
-      - ".github/workflows/**"
+      - ".github/workflows/validate.yml"
+  workflow_dispatch:
 
 jobs:
   validate:
     runs-on: [self-hosted, Linux, X64, deteng-runner-1]
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Install deps
+      # IMPORTANT: Use setup-python so pip exists (your runner's /usr/bin/python3 has no pip)
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Bootstrap pip + install deps
         run: |
-          python3 -m pip install --upgrade pip
-          pip3 install requests pyyaml
+          python -V
+          python -m ensurepip --upgrade || true
+          python -m pip install --upgrade pip
+          python -m pip install -r pipelines/requirements.txt
 
-      - name: Validate fields + KQL dry-run (staging)
+      - name: Validate fields exist in Elasticsearch (staging)
         env:
-          ELASTICSEARCH_URL: ${{ secrets.ELASTICSEARCH_URL }}
-          KIBANA_URL: ${{ secrets.KIBANA_URL }}
-          KIBANA_SPACE: ${{ secrets.KIBANA_SPACE }}
-          ELASTIC_USERNAME: ${{ secrets.ELASTIC_USERNAME }}
-          ELASTIC_PASSWORD: ${{ secrets.ELASTIC_PASSWORD }}
+          ELASTIC_URL: ${{ secrets.ELASTIC_URL }}
+          ELASTIC_API_KEY: ${{ secrets.ELASTIC_API_KEY }}
+          INDEX_PATTERN: "logs-*"   # adjust if needed
         run: |
-          python3 pipelines/validate_fields.py \
-            --rule detections/entra/entra_high_medium_risk_outside_us.yml \
-            --es-url "$ELASTICSEARCH_URL" \
-            --kibana-url "$KIBANA_URL" \
-            --kibana-space "$KIBANA_SPACE" \
-            --insecure
+          python pipelines/validate_fields.py
+
+      - name: Dry-run detection queries (staging)
+        env:
+          ELASTIC_URL: ${{ secrets.ELASTIC_URL }}
+          ELASTIC_API_KEY: ${{ secrets.ELASTIC_API_KEY }}
+          INDEX_PATTERN: "logs-*"   # adjust if needed
+        run: |
+          python pipelines/dry_run_detection.py
