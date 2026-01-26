@@ -1,0 +1,10 @@
+name: "Entra ID High or Medium Risk Sign-in Outside US"
+index:
+  - "logs-*"
+language: "kuery"
+query: >
+  azure.signinlogs.properties.risk_level_aggregated:(high or medium)
+  and not source.geo.country_iso_code:US
+required_fields:
+  - "azure.signinlogs.properties.risk_level_aggregated"
+  - "source.geo.country_iso_code"

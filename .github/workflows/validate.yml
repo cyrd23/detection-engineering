@@ -6,29 +6,30 @@ on:
     paths:
       - "detections/**"
       - "pipelines/**"
-      - ".github/workflows/validate.yml"
+      - ".github/workflows/**"
 
 jobs:
   validate:
     runs-on: [self-hosted, Linux, X64, deteng-runner-1]
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+      - uses: actions/checkout@v4
 
       - name: Install deps
         run: |
-          python -m pip install --upgrade pip
-          pip install pyyaml requests
+          python3 -m pip install --upgrade pip
+          pip3 install requests pyyaml
 
-      - name: Validate fields against Elasticsearch
+      - name: Validate fields + KQL dry-run (staging)
         env:
           ELASTICSEARCH_URL: ${{ secrets.ELASTICSEARCH_URL }}
-          ELASTIC_API_KEY: ${{ secrets.ELASTIC_API_KEY }}
+          KIBANA_URL: ${{ secrets.KIBANA_URL }}
+          KIBANA_SPACE: ${{ secrets.KIBANA_SPACE }}
+          ELASTIC_USERNAME: ${{ secrets.ELASTIC_USERNAME }}
+          ELASTIC_PASSWORD: ${{ secrets.ELASTIC_PASSWORD }}
         run: |
-          python pipelines/validate_fields.py
+          python3 pipelines/validate_fields.py \
+            --rule detections/entra/entra_high_medium_risk_outside_us.yml \
+            --es-url "$ELASTICSEARCH_URL" \
+            --kibana-url "$KIBANA_URL" \
+            --kibana-space "$KIBANA_SPACE" \
+            --insecure
