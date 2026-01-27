@@ -22,3 +22,4 @@ required_fields:
 query: >
   azure.signinlogs.properties.risk_level_aggregated : ("medium" or "high")
   and not source.geo.country_iso_code : "US"
+# ci touch 2026-01-27T19:03:45Z
