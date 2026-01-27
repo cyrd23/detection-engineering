@@ -10,14 +10,7 @@ on:
 
 jobs:
   validate:
-    runs-on: [self-hosted, Linux, X64]
-
-    env:
-      ES_URL: ${{ secrets.ELASTICSEARCH_URL }}
-      ES_USERNAME: ${{ secrets.ELASTIC_USERNAME }}
-      ES_PASSWORD: ${{ secrets.ELASTIC_PASSWORD }}
-      KIBANA_URL: ${{ secrets.KIBANA_URL }}
-      KIBANA_SPACE: ${{ secrets.KIBANA_SPACE }}
+    runs-on: self-hosted
 
     steps:
       - name: Checkout
@@ -34,24 +27,36 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r pipelines/requirements.txt
 
-      # ---- FIELD VALIDATION ----
+      # -------------------------------
+      # Field existence validation
+      # -------------------------------
 
       - name: Validate fields exist in Elasticsearch (staging)
+        env:
+          ELASTICSEARCH_URL: ${{ secrets.ELASTICSEARCH_URL }}
+          KIBANA_URL: ${{ secrets.KIBANA_URL }}
+          KIBANA_SPACE: ${{ secrets.KIBANA_SPACE }}
+          ELASTIC_API_KEY: ${{ secrets.ELASTIC_API_KEY }}
         run: |
           python pipelines/validate_fields.py \
             --rule detections/entra/entra_risk_outside_us.yml \
-            --es-url "$ES_URL" \
-            --username "$ES_USERNAME" \
-            --password "$ES_PASSWORD" \
+            --es-url "$ELASTICSEARCH_URL" \
             --kibana-url "$KIBANA_URL" \
-            --kibana-space "$KIBANA_SPACE"
+            --kibana-space "$KIBANA_SPACE" \
+            --api-key "$ELASTIC_API_KEY" \
+            --insecure
 
-      # ---- QUERY DRY RUN ----
+      # -------------------------------
+      # Query dry run (KQL/DSL syntax)
+      # -------------------------------
 
       - name: Dry-run detection queries (staging)
+        env:
+          ELASTICSEARCH_URL: ${{ secrets.ELASTICSEARCH_URL }}
+          ELASTIC_API_KEY: ${{ secrets.ELASTIC_API_KEY }}
         run: |
           python pipelines/dry_run_detection.py \
             --rule detections/entra/entra_risk_outside_us.yml \
-            --es-url "$ES_URL" \
-            --username "$ES_USERNAME" \
-            --password "$ES_PASSWORD"
+            --es-url "$ELASTICSEARCH_URL" \
+            --api-key "$ELASTIC_API_KEY" \
+            --insecure
