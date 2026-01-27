@@ -1,147 +1,122 @@
-#!/usr/bin/env python3
+name: Validate Detections
 
-import argparse
-import os
-import sys
-import yaml
-import requests
-import urllib3
+on:
+  workflow_dispatch:
+    inputs:
+      all:
+        description: "Validate ALL detections (true/false)"
+        required: false
+        default: "false"
+  push:
+    branches: [ "main" ]
+    paths:
+      - "detections/**"
+      - "pipelines/**"
+      - ".github/workflows/validate.yml"
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - "detections/**"
+      - "pipelines/**"
+      - ".github/workflows/validate.yml"
 
-# -----------------------------
-# Helpers
-# -----------------------------
+jobs:
+  validate:
+    # IMPORTANT: use the label(s) your self-hosted runner actually has
+    runs-on: [self-hosted]
 
-def load_rule(path):
-    with open(path, "r") as f:
-        return yaml.safe_load(f)
+    env:
+      # ---- Map your repo secrets to what the scripts expect ----
+      KIBANA_URL: ${{ secrets.KIBANA_URL }}
+      KIBANA_SPACE: ${{ secrets.KIBANA_SPACE }}
 
+      ELASTIC_URL: ${{ secrets.ELASTICSEARCH_URL }}     # <-- dry_run_detection.py expects ELASTIC_URL
+      ELASTIC_API_KEY: ${{ secrets.ELASTIC_API_KEY }}
 
-def get_required_fields(rule):
-    rf = rule.get("required_fields", [])
-    fields = []
+      ELASTIC_USERNAME: ${{ secrets.ELASTIC_USERNAME }}
+      ELASTIC_PASSWORD: ${{ secrets.ELASTIC_PASSWORD }}
 
-    for entry in rf:
-        if isinstance(entry, dict) and "name" in entry:
-            fields.append(entry["name"])
-        elif isinstance(entry, str):
-            fields.append(entry)
+      # If your scripts also accept ES_URL, set it too (harmless)
+      ES_URL: ${{ secrets.ELASTICSEARCH_URL }}
 
-    return fields
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-def get_index_patterns(rule):
-    idx = rule.get("index", [])
+      - name: Bootstrap pip + install deps
+        run: |
+          python -m ensurepip --upgrade
+          python -m pip install --upgrade pip
+          python -m pip install -r pipelines/requirements.txt
 
-    if isinstance(idx, str):
-        return [idx]
+      - name: Determine detection files to validate
+        id: files
+        shell: bash
+        run: |
+          set -euo pipefail
 
-    return idx
+          # Manual run can validate everything
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ github.event.inputs.all }}" == "true" ]]; then
+            find detections -type f \( -name "*.yml" -o -name "*.yaml" \) | sort > /tmp/detections.txt
+            echo "mode=all" >> "$GITHUB_OUTPUT"
+          else
+            # PR: diff vs base; Push: diff vs previous commit
+            if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+              git diff --name-only "origin/${{ github.base_ref }}"...HEAD \
+                | grep -E '^detections/.*\.(yml|yaml)$' \
+                | sort > /tmp/detections.txt || true
+            else
+              git diff --name-only HEAD~1...HEAD \
+                | grep -E '^detections/.*\.(yml|yaml)$' \
+                | sort > /tmp/detections.txt || true
+            fi
 
+            # If none changed, exit gracefully
+            if [[ ! -s /tmp/detections.txt ]]; then
+              echo "No detection files changed."
+              echo "mode=none" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
 
-# -----------------------------
-# Elasticsearch field caps
-# -----------------------------
+            echo "mode=changed" >> "$GITHUB_OUTPUT"
+          fi
 
-def field_caps(es_url, index, required_fields, headers, auth=None, insecure=False):
-    session = requests.Session()
+          echo "Files to validate:"
+          cat /tmp/detections.txt
 
-    if insecure:
-        session.verify = False
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+      - name: Validate fields exist in Elasticsearch (staging)
+        if: steps.files.outputs.mode != 'none'
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r rule; do
+            echo "==> Field validation: $rule"
+            python pipelines/validate_fields.py \
+              --rule "$rule" \
+              --es-url "$ELASTIC_URL" \
+              --username "$ELASTIC_USERNAME" \
+              --password "$ELASTIC_PASSWORD" \
+              --api-key "$ELASTIC_API_KEY" \
+              --insecure
+          done < /tmp/detections.txt
 
-    fields_param = ",".join(required_fields)
-
-    url = f"{es_url.rstrip('/')}/{index}/_field_caps"
-    params = {"fields": fields_param}
-
-    resp = session.get(
-        url,
-        params=params,
-        headers=headers,
-        auth=auth,
-        timeout=30,
-    )
-
-    resp.raise_for_status()
-    payload = resp.json()
-
-    found = payload.get("fields", {})
-    missing = [f for f in required_fields if f not in found]
-
-    return missing, payload
-
-
-# -----------------------------
-# Main
-# -----------------------------
-
-def main():
-    parser = argparse.ArgumentParser(description="Validate detection fields exist in Elasticsearch")
-
-    parser.add_argument("--rule", required=True)
-    parser.add_argument("--es-url", required=True)
-    parser.add_argument("--kibana-url")
-    parser.add_argument("--kibana-space")
-    parser.add_argument("--username")
-    parser.add_argument("--password")
-    parser.add_argument("--api-key")
-    parser.add_argument("--insecure", action="store_true")
-
-    args = parser.parse_args()
-
-    rule = load_rule(args.rule)
-
-    required_fields = get_required_fields(rule)
-    index_patterns = get_index_patterns(rule)
-
-    if not required_fields:
-        print("❌ No required_fields defined in rule")
-        sys.exit(1)
-
-    if not index_patterns:
-        print("❌ No index patterns defined in rule")
-        sys.exit(1)
-
-    headers = {}
-
-    auth = None
-
-    if args.api_key:
-        headers["Authorization"] = f"ApiKey {args.api_key}"
-    elif args.username and args.password:
-        auth = (args.username, args.password)
-    else:
-        print("❌ Must supply API key or username/password")
-        sys.exit(1)
-
-    overall_missing = False
-
-    for index in index_patterns:
-        print(f"\n🔍 Checking index pattern: {index}")
-
-        missing, _payload = field_caps(
-            es_url=args.es_url,
-            index=index,
-            required_fields=required_fields,
-            headers=headers,
-            auth=auth,
-            insecure=args.insecure,
-        )
-
-        if missing:
-            overall_missing = True
-            print("❌ Missing fields:")
-            for f in missing:
-                print(f"   - {f}")
-        else:
-            print("✅ All required fields exist")
-
-    if overall_missing:
-        print("\n🚫 Validation failed — missing required fields")
-        sys.exit(1)
-
-    print("\n🎉 Field validation passed")
-
-
-if __name__ == "__main__":
-    main()
+      - name: Dry-run detection queries (staging)
+        if: steps.files.outputs.mode != 'none'
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r rule; do
+            echo "==> Dry-run: $rule"
+            python pipelines/dry_run_detection.py \
+              --rule "$rule" \
+              --es-url "$ELASTIC_URL" \
+              --api-key "$ELASTIC_API_KEY" \
+              --insecure
+          done < /tmp/detections.txt
