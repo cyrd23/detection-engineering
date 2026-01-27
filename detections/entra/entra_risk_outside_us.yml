@@ -3,16 +3,21 @@ description: High/Medium risk Entra ID sign-in where the source country is not U
 type: query
 language: kuery
 
-# Update this index pattern to whatever your Entra sign-in logs land in
 index:
   - logs-azure.signinlogs*
 
-# Optional but commonly expected in Elastic-style rule metadata
 severity: high
 risk_score: 73
 enabled: true
 interval: 5m
 from: now-15m
+
+# ✅ Required by your CI validator
+required_fields:
+  - name: azure.signinlogs.properties.risk_level_aggregated
+    type: keyword
+  - name: source.geo.country_iso_code
+    type: keyword
 
 query: >
   azure.signinlogs.properties.risk_level_aggregated : ("medium" or "high")
