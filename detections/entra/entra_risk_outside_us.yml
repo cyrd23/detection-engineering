@@ -1,22 +1,19 @@
 name: Entra ID High or Medium Risk Sign-in Outside US
-language: sigma
-id: entra_high_medium_risk_signin_outside_us
-description: High/Medium risk Entra ID sign-ins where the source country is not US.
-severity: high
-enabled: true
+description: High/Medium risk Entra ID sign-in where the source country is not US.
+type: query
+language: kuery
 
-logsource:
-  product: azure
-  service: signinlogs
-
+# Update this index pattern to whatever your Entra sign-in logs land in
 index:
   - logs-azure.signinlogs*
 
-detection:
-  selection:
-    azure.signinlogs.properties.risk_level_aggregated:
-      - medium
-      - high
-  filter_geo:
-    source.geo.country_iso_code: US
-  condition: selection and not filter_geo
+# Optional but commonly expected in Elastic-style rule metadata
+severity: high
+risk_score: 73
+enabled: true
+interval: 5m
+from: now-15m
+
+query: >
+  azure.signinlogs.properties.risk_level_aggregated : ("medium" or "high")
+  and not source.geo.country_iso_code : "US"
