@@ -8,6 +8,9 @@ logsource:
   product: azure
   service: signinlogs
 
+index:
+  - logs-azure.signinlogs*
+
 detection:
   selection:
     azure.signinlogs.properties.risk_level_aggregated:
