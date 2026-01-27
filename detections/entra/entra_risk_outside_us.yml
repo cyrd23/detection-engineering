@@ -1,4 +1,5 @@
 name: Entra ID High or Medium Risk Sign-in Outside US
+language: sigma
 id: entra_high_medium_risk_signin_outside_us
 description: High/Medium risk Entra ID sign-ins where the source country is not US.
 severity: high
