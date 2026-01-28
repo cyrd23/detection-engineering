@@ -1,122 +1,153 @@
-name: Validate Detections
+#!/usr/bin/env python3
+import argparse
+import sys
+import json
+from typing import Any, Dict, List, Tuple, Optional
 
-on:
-  workflow_dispatch:
-    inputs:
-      all:
-        description: "Validate ALL detections (true/false)"
-        required: false
-        default: "false"
-  push:
-    branches: [ "main" ]
-    paths:
-      - "detections/**"
-      - "pipelines/**"
-      - ".github/workflows/validate.yml"
-  pull_request:
-    branches: [ "main" ]
-    paths:
-      - "detections/**"
-      - "pipelines/**"
-      - ".github/workflows/validate.yml"
+import requests
+import yaml
 
-jobs:
-  validate:
-    # IMPORTANT: use the label(s) your self-hosted runner actually has
-    runs-on: [self-hosted]
+def die(msg: str, code: int = 1) -> None:
+    print(f"ERROR: {msg}", file=sys.stderr)
+    sys.exit(code)
 
-    env:
-      # ---- Map your repo secrets to what the scripts expect ----
-      KIBANA_URL: ${{ secrets.KIBANA_URL }}
-      KIBANA_SPACE: ${{ secrets.KIBANA_SPACE }}
+def load_rule(path: str) -> Dict[str, Any]:
+    with open(path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    if not isinstance(data, dict):
+        die(f"{path}: rule file is not a YAML mapping/object")
+    return data
 
-      ELASTIC_URL: ${{ secrets.ELASTICSEARCH_URL }}     # <-- dry_run_detection.py expects ELASTIC_URL
-      ELASTIC_API_KEY: ${{ secrets.ELASTIC_API_KEY }}
+def normalize_required_fields(rule: Dict[str, Any], path: str) -> List[Dict[str, str]]:
+    rf = rule.get("required_fields")
+    if rf is None:
+        die(f"{path}: missing required key 'required_fields'")
+    if not isinstance(rf, list) or not rf:
+        die(f"{path}: 'required_fields' must be a non-empty list")
 
-      ELASTIC_USERNAME: ${{ secrets.ELASTIC_USERNAME }}
-      ELASTIC_PASSWORD: ${{ secrets.ELASTIC_PASSWORD }}
+    out: List[Dict[str, str]] = []
+    for i, item in enumerate(rf):
+        if not isinstance(item, dict):
+            die(f"{path}: required_fields[{i}] must be an object like {{name,type}}")
+        name = item.get("name")
+        ftype = item.get("type")
+        if not name or not isinstance(name, str):
+            die(f"{path}: required_fields[{i}] missing/invalid 'name'")
+        if not ftype or not isinstance(ftype, str):
+            die(f"{path}: required_fields[{i}] missing/invalid 'type'")
+        out.append({"name": name, "type": ftype})
+    return out
 
-      # If your scripts also accept ES_URL, set it too (harmless)
-      ES_URL: ${{ secrets.ELASTICSEARCH_URL }}
+def validate_rule_shape(rule: Dict[str, Any], path: str) -> None:
+    # These are the keys your CI has been enforcing via earlier errors
+    required_top = ["name", "type", "language", "index", "query", "required_fields"]
+    for k in required_top:
+        if k not in rule:
+            die(f"{path}: missing required key '{k}'")
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+    if not isinstance(rule.get("index"), list) or not rule["index"]:
+        die(f"{path}: 'index' must be a non-empty list (e.g. ['logs-azure.signinlogs*'])")
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+    if not isinstance(rule.get("query"), str) or not rule["query"].strip():
+        die(f"{path}: 'query' must be a non-empty string")
 
-      - name: Bootstrap pip + install deps
-        run: |
-          python -m ensurepip --upgrade
-          python -m pip install --upgrade pip
-          python -m pip install -r pipelines/requirements.txt
+def es_field_caps(
+    es_url: str,
+    index_patterns: List[str],
+    fields: List[str],
+    api_key: Optional[str],
+    username: Optional[str],
+    password: Optional[str],
+    insecure: bool,
+) -> Dict[str, Any]:
+    # Use a single request across all index patterns (comma-separated)
+    index_expr = ",".join(index_patterns)
+    url = f"{es_url.rstrip('/')}/{index_expr}/_field_caps"
+    params = [("fields", f) for f in fields]
 
-      - name: Determine detection files to validate
-        id: files
-        shell: bash
-        run: |
-          set -euo pipefail
+    headers: Dict[str, str] = {"Accept": "application/json"}
+    auth = None
+    if api_key:
+        headers["Authorization"] = f"ApiKey {api_key}"
+    elif username and password:
+        auth = (username, password)
 
-          # Manual run can validate everything
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ github.event.inputs.all }}" == "true" ]]; then
-            find detections -type f \( -name "*.yml" -o -name "*.yaml" \) | sort > /tmp/detections.txt
-            echo "mode=all" >> "$GITHUB_OUTPUT"
-          else
-            # PR: diff vs base; Push: diff vs previous commit
-            if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-              git diff --name-only "origin/${{ github.base_ref }}"...HEAD \
-                | grep -E '^detections/.*\.(yml|yaml)$' \
-                | sort > /tmp/detections.txt || true
-            else
-              git diff --name-only HEAD~1...HEAD \
-                | grep -E '^detections/.*\.(yml|yaml)$' \
-                | sort > /tmp/detections.txt || true
-            fi
+    s = requests.Session()
+    verify = not insecure
 
-            # If none changed, exit gracefully
-            if [[ ! -s /tmp/detections.txt ]]; then
-              echo "No detection files changed."
-              echo "mode=none" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
+    try:
+        resp = s.get(url, headers=headers, auth=auth, params=params, timeout=30, verify=verify)
+    except requests.exceptions.SSLError as e:
+        die(f"TLS/SSL error talking to Elasticsearch. If this is a self-signed cert, pass --insecure. Details: {e}")
+    except requests.RequestException as e:
+        die(f"HTTP error talking to Elasticsearch: {e}")
 
-            echo "mode=changed" >> "$GITHUB_OUTPUT"
-          fi
+    if resp.status_code >= 400:
+        die(f"Elasticsearch field_caps failed ({resp.status_code}): {resp.text[:500]}")
 
-          echo "Files to validate:"
-          cat /tmp/detections.txt
+    try:
+        return resp.json()
+    except Exception:
+        die(f"Elasticsearch returned non-JSON response: {resp.text[:200]}")
 
-      - name: Validate fields exist in Elasticsearch (staging)
-        if: steps.files.outputs.mode != 'none'
-        shell: bash
-        run: |
-          set -euo pipefail
-          while IFS= read -r rule; do
-            echo "==> Field validation: $rule"
-            python pipelines/validate_fields.py \
-              --rule "$rule" \
-              --es-url "$ELASTIC_URL" \
-              --username "$ELASTIC_USERNAME" \
-              --password "$ELASTIC_PASSWORD" \
-              --api-key "$ELASTIC_API_KEY" \
-              --insecure
-          done < /tmp/detections.txt
+def find_missing_fields(field_caps_payload: Dict[str, Any], required: List[Dict[str, str]]) -> List[str]:
+    # Payload shape: {"fields": {"fieldA": {"keyword": {...}}, "fieldB": {...}}}
+    fields_obj = field_caps_payload.get("fields") or {}
+    missing: List[str] = []
 
-      - name: Dry-run detection queries (staging)
-        if: steps.files.outputs.mode != 'none'
-        shell: bash
-        run: |
-          set -euo pipefail
-          while IFS= read -r rule; do
-            echo "==> Dry-run: $rule"
-            python pipelines/dry_run_detection.py \
-              --rule "$rule" \
-              --es-url "$ELASTIC_URL" \
-              --api-key "$ELASTIC_API_KEY" \
-              --insecure
-          done < /tmp/detections.txt
+    for req in required:
+        name = req["name"]
+        expected_type = req["type"]
+        entry = fields_obj.get(name)
+
+        if not entry:
+            missing.append(f"{name} (expected: {expected_type})")
+            continue
+
+        # entry is a dict keyed by ES type ("keyword", "text", "ip", etc.)
+        # Accept missing type mismatch as "missing/mismatch"
+        if expected_type not in entry.keys():
+            missing.append(f"{name} (expected type: {expected_type}; got: {','.join(entry.keys())})")
+
+    return missing
+
+def main() -> None:
+    p = argparse.ArgumentParser(description="Validate required_fields exist in Elasticsearch via _field_caps")
+    p.add_argument("--rule", required=True, help="Path to a detection YAML rule")
+    p.add_argument("--es-url", required=True, help="Elasticsearch base URL, e.g. https://192.168.40.20:9200")
+    p.add_argument("--api-key", default="", help="Elastic API key (base64 token)")
+    p.add_argument("--username", default="", help="Basic auth username (optional if api-key provided)")
+    p.add_argument("--password", default="", help="Basic auth password (optional if api-key provided)")
+    p.add_argument("--insecure", action="store_true", help="Disable TLS verification (self-signed certs)")
+
+    args = p.parse_args()
+
+    rule = load_rule(args.rule)
+    validate_rule_shape(rule, args.rule)
+    required_fields = normalize_required_fields(rule, args.rule)
+
+    index_patterns = rule["index"]
+    fields = [rf["name"] for rf in required_fields]
+
+    payload = es_field_caps(
+        es_url=args.es_url,
+        index_patterns=index_patterns,
+        fields=fields,
+        api_key=args.api_key or None,
+        username=args.username or None,
+        password=args.password or None,
+        insecure=args.insecure,
+    )
+
+    missing = find_missing_fields(payload, required_fields)
+    if missing:
+        print(f"ERROR: {args.rule}: missing required field(s):")
+        for m in missing:
+            print(f"  - {m}")
+        sys.exit(1)
+
+    print(f"OK: {args.rule}: all required_fields exist in Elasticsearch.")
+    sys.exit(0)
+
+if __name__ == "__main__":
+    main()
