@@ -8,13 +8,13 @@ on:
         required: false
         default: "false"
   push:
-    branches: [ "main" ]
+    branches: ["main"]
     paths:
       - "detections/**"
       - "pipelines/**"
       - ".github/workflows/validate.yml"
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
     paths:
       - "detections/**"
       - "pipelines/**"
@@ -22,23 +22,36 @@ on:
 
 jobs:
   validate:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
+
+    # Map GitHub Secrets -> env vars expected by your Python scripts
+    env:
+      ELASTIC_URL: ${{ secrets.ELASTICSEARCH_URL }}
+      ELASTIC_API_KEY: ${{ secrets.ELASTIC_API_KEY }}
+      ELASTIC_USERNAME: ${{ secrets.ELASTIC_USERNAME }}
+      ELASTIC_PASSWORD: ${{ secrets.ELASTIC_PASSWORD }}
+      KIBANA_URL: ${{ secrets.KIBANA_URL }}
+      KIBANA_SPACE: ${{ secrets.KIBANA_SPACE }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Bootstrap pip + install deps
+      - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install -r pipelines/requirements.txt
+          pip install -r requirements.txt
+
+      # Safe debug so you can confirm variables are present (doesn't print values)
+      - name: Debug env presence
+        run: |
+          test -n "${ELASTIC_URL:-}" && echo "ELASTIC_URL is set" || echo "ELASTIC_URL is NOT set"
+          test -n "${ELASTIC_API_KEY:-}" && echo "ELASTIC_API_KEY is set" || echo "ELASTIC_API_KEY is NOT set"
 
       - name: Determine detection files to validate
         id: files
@@ -46,64 +59,50 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.all }}" == "true" ]]; then
-            files=$(git ls-files 'detections/**/*.yml' 'detections/**/*.yaml' | tr '\n' ' ')
-            echo "files=$files" >> "$GITHUB_OUTPUT"
-            echo "Validating ALL detections."
+            echo "files=ALL" >> $GITHUB_OUTPUT
             exit 0
           fi
 
+          # PR: diff against base
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            base="${{ github.event.pull_request.base.sha }}"
-            head="${{ github.sha }}"
+            git fetch --no-tags --prune --depth=1 origin "${{ github.base_ref }}"
+            CHANGED=$(git diff --name-only "origin/${{ github.base_ref }}"...HEAD | grep '^detections/.*\.yml$' || true)
           else
-            base="${{ github.event.before }}"
-            head="${{ github.sha }}"
+            # push: diff against previous commit
+            CHANGED=$(git diff --name-only HEAD~1..HEAD | grep '^detections/.*\.yml$' || true)
           fi
 
-          changed=$(git diff --name-only "$base" "$head" -- 'detections/**/*.yml' 'detections/**/*.yaml' | tr '\n' ' ')
-          if [[ -z "$changed" ]]; then
+          if [[ -z "$CHANGED" ]]; then
             echo "No detection files changed."
-            echo "files=" >> "$GITHUB_OUTPUT"
+            echo "files=NONE" >> $GITHUB_OUTPUT
           else
             echo "Changed detection files:"
-            echo "$changed"
-            echo "files=$changed" >> "$GITHUB_OUTPUT"
+            echo "$CHANGED"
+            echo "files<<EOF" >> $GITHUB_OUTPUT
+            echo "$CHANGED" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
           fi
 
       - name: Validate fields exist in Elasticsearch (staging)
-        if: steps.files.outputs.files != ''
-        env:
-          ELASTICSEARCH_URL: ${{ secrets.ELASTICSEARCH_URL }}
-          ELASTIC_API_KEY: ${{ secrets.ELASTIC_API_KEY }}
-          ELASTIC_USERNAME: ${{ secrets.ELASTIC_USERNAME }}
-          ELASTIC_PASSWORD: ${{ secrets.ELASTIC_PASSWORD }}
-        shell: bash
+        if: steps.files.outputs.files != 'NONE'
         run: |
-          set -euo pipefail
-          for f in ${{ steps.files.outputs.files }}; do
-            echo "==> Field validation: $f"
-            python pipelines/validate_fields.py \
-              --rule "$f" \
-              --es-url "${ELASTICSEARCH_URL}" \
-              --api-key "${ELASTIC_API_KEY}" \
-              --username "${ELASTIC_USERNAME}" \
-              --password "${ELASTIC_PASSWORD}" \
-              --insecure
-          done
+          if [[ "${{ steps.files.outputs.files }}" == "ALL" ]]; then
+            python pipelines/validate_fields.py --all
+          else
+            while IFS= read -r f; do
+              [[ -z "$f" ]] && continue
+              python pipelines/validate_fields.py --file "$f"
+            done <<< "${{ steps.files.outputs.files }}"
+          fi
 
       - name: Dry-run detection queries (staging)
-        if: steps.files.outputs.files != ''
-        env:
-          ELASTICSEARCH_URL: ${{ secrets.ELASTICSEARCH_URL }}
-          ELASTIC_API_KEY: ${{ secrets.ELASTIC_API_KEY }}
-        shell: bash
+        if: steps.files.outputs.files != 'NONE'
         run: |
-          set -euo pipefail
-          for f in ${{ steps.files.outputs.files }}; do
-            echo "==> Dry-run query: $f"
-            python pipelines/dry_run_detection.py \
-              --rule "$f" \
-              --es-url "${ELASTICSEARCH_URL}" \
-              --api-key "${ELASTIC_API_KEY}" \
-              --insecure
-          done
+          if [[ "${{ steps.files.outputs.files }}" == "ALL" ]]; then
+            python pipelines/dry_run_detection.py --all
+          else
+            while IFS= read -r f; do
+              [[ -z "$f" ]] && continue
+              python pipelines/dry_run_detection.py --file "$f"
+            done <<< "${{ steps.files.outputs.files }}"
+          fi
