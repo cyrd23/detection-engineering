@@ -22,10 +22,13 @@ on:
 
 jobs:
   validate:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
 
-    # Map GitHub Secrets -> env vars expected by your Python scripts
     env:
+      # --- Map GitHub Secrets -> env vars expected by your python scripts ---
+      # Secrets you have in GitHub:
+      #   ELASTICSEARCH_URL, ELASTIC_API_KEY, ELASTIC_USERNAME, ELASTIC_PASSWORD, KIBANA_URL, KIBANA_SPACE
       ELASTIC_URL: ${{ secrets.ELASTICSEARCH_URL }}
       ELASTIC_API_KEY: ${{ secrets.ELASTIC_API_KEY }}
       ELASTIC_USERNAME: ${{ secrets.ELASTIC_USERNAME }}
@@ -33,9 +36,18 @@ jobs:
       KIBANA_URL: ${{ secrets.KIBANA_URL }}
       KIBANA_SPACE: ${{ secrets.KIBANA_SPACE }}
 
+      # Optional: allow self-signed TLS if your scripts honor this (many do)
+      # If your scripts don't use it, it won't hurt anything.
+      ELASTIC_VERIFY_TLS: "false"
+
+      # This is used by the "determine changed files" step
+      VALIDATE_ALL: ${{ github.event.inputs.all || 'false' }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -45,64 +57,63 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r pipelines/requirements.txt
 
-      # Safe debug so you can confirm variables are present (doesn't print values)
-      - name: Debug env presence
+      - name: Debug env presence (no secrets printed)
+        shell: bash
         run: |
-          test -n "${ELASTIC_URL:-}" && echo "ELASTIC_URL is set" || echo "ELASTIC_URL is NOT set"
-          test -n "${ELASTIC_API_KEY:-}" && echo "ELASTIC_API_KEY is set" || echo "ELASTIC_API_KEY is NOT set"
+          set -euo pipefail
+          echo "ELASTIC_URL set?          $([ -n "${ELASTIC_URL:-}" ] && echo yes || echo no)"
+          echo "ELASTIC_API_KEY set?      $([ -n "${ELASTIC_API_KEY:-}" ] && echo yes || echo no)"
+          echo "ELASTIC_USERNAME set?     $([ -n "${ELASTIC_USERNAME:-}" ] && echo yes || echo no)"
+          echo "ELASTIC_PASSWORD set?     $([ -n "${ELASTIC_PASSWORD:-}" ] && echo yes || echo no)"
+          echo "KIBANA_URL set?           $([ -n "${KIBANA_URL:-}" ] && echo yes || echo no)"
+          echo "KIBANA_SPACE set?         $([ -n "${KIBANA_SPACE:-}" ] && echo yes || echo no)"
+          echo "VALIDATE_ALL=${VALIDATE_ALL}"
 
       - name: Determine detection files to validate
         id: files
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.all }}" == "true" ]]; then
-            echo "files=ALL" >> $GITHUB_OUTPUT
+
+          if [[ "${VALIDATE_ALL}" == "true" ]]; then
+            echo "files=$(find detections -type f \( -name '*.yml' -o -name '*.yaml' \) | sort | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+            echo "Selected ALL detections."
             exit 0
           fi
 
-          # PR: diff against base
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            git fetch --no-tags --prune --depth=1 origin "${{ github.base_ref }}"
-            CHANGED=$(git diff --name-only "origin/${{ github.base_ref }}"...HEAD | grep '^detections/.*\.yml$' || true)
+          # For push events we compare against previous commit; for PR compare against base
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            git fetch origin "${{ github.base_ref }}" --depth=1
+            DIFF_RANGE="origin/${{ github.base_ref }}...HEAD"
           else
-            # push: diff against previous commit
-            CHANGED=$(git diff --name-only HEAD~1..HEAD | grep '^detections/.*\.yml$' || true)
+            DIFF_RANGE="HEAD~1...HEAD"
           fi
 
-          if [[ -z "$CHANGED" ]]; then
+          CHANGED=$(git diff --name-only ${DIFF_RANGE} -- 'detections/**' | grep -E '\.(yml|yaml)$' || true)
+
+          if [[ -z "${CHANGED}" ]]; then
             echo "No detection files changed."
-            echo "files=NONE" >> $GITHUB_OUTPUT
-          else
-            echo "Changed detection files:"
-            echo "$CHANGED"
-            echo "files<<EOF" >> $GITHUB_OUTPUT
-            echo "$CHANGED" >> $GITHUB_OUTPUT
-            echo "EOF" >> $GITHUB_OUTPUT
+            echo "files=" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+
+          echo "Changed detections:"
+          echo "${CHANGED}"
+
+          echo "files=$(echo "${CHANGED}" | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
 
       - name: Validate fields exist in Elasticsearch (staging)
-        if: steps.files.outputs.files != 'NONE'
+        if: ${{ steps.files.outputs.files != '' }}
+        shell: bash
         run: |
-          if [[ "${{ steps.files.outputs.files }}" == "ALL" ]]; then
-            python pipelines/validate_fields.py --all
-          else
-            while IFS= read -r f; do
-              [[ -z "$f" ]] && continue
-              python pipelines/validate_fields.py --file "$f"
-            done <<< "${{ steps.files.outputs.files }}"
-          fi
+          set -euo pipefail
+          python pipelines/validate_fields.py ${{ steps.files.outputs.files }}
 
       - name: Dry-run detection queries (staging)
-        if: steps.files.outputs.files != 'NONE'
+        if: ${{ steps.files.outputs.files != '' }}
+        shell: bash
         run: |
-          if [[ "${{ steps.files.outputs.files }}" == "ALL" ]]; then
-            python pipelines/dry_run_detection.py --all
-          else
-            while IFS= read -r f; do
-              [[ -z "$f" ]] && continue
-              python pipelines/dry_run_detection.py --file "$f"
-            done <<< "${{ steps.files.outputs.files }}"
-          fi
+          set -euo pipefail
+          python pipelines/dry_run_detection.py ${{ steps.files.outputs.files }}
