@@ -1,67 +1,79 @@
 name: Validate Detections
 
 on:
-  workflow_dispatch:
-    inputs:
-      all:
-        description: "Validate ALL detections (true/false)"
-        required: false
-        default: "false"
   push:
-    branches: ["main"]
+    branches: [ "main" ]
     paths:
       - "detections/**"
       - "pipelines/**"
-      - ".github/workflows/validate.yml"
   pull_request:
-    branches: ["main"]
-    paths:
-      - "detections/**"
-      - "pipelines/**"
-      - ".github/workflows/validate.yml"
+    branches: [ "main" ]
+  workflow_dispatch:
 
 jobs:
   validate:
-    name: Field Validation + Dry Run
-    runs-on: [self-hosted, Linux, X64, deteng-runner-1]
-    timeout-minutes: 15
+    runs-on: [self-hosted, cicd-runner-01]
 
     env:
-      ELASTICSEARCH_URL: ${{ secrets.ELASTICSEARCH_URL }}
-      ELASTIC_USERNAME: ${{ secrets.ELASTIC_USERNAME }}
-      ELASTIC_PASSWORD: ${{ secrets.ELASTIC_PASSWORD }}
-      ELASTIC_INSECURE: ${{ secrets.ELASTIC_INSECURE }}
+      ES_URL: ${{ secrets.ELASTICSEARCH_URL }}
+      ES_USERNAME: ${{ secrets.ELASTIC_USERNAME }}
+      ES_PASSWORD: ${{ secrets.ELASTIC_PASSWORD }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r pipelines/requirements.txt
 
-      - name: Validate fields exist in Elasticsearch
+      - name: Get changed detection files
+        id: changes
         run: |
-          python pipelines/validate_fields.py \
-            --detections-path detections \
-            --elasticsearch-url "$ELASTICSEARCH_URL" \
-            --username "$ELASTIC_USERNAME" \
-            --password "$ELASTIC_PASSWORD" \
-            --insecure "${ELASTIC_INSECURE:-false}" \
-            $([ "${{ github.event.inputs.all }}" = "true" ] && echo "--all")
+          git diff --name-only HEAD~1 HEAD | grep '^detections/.*\.yml$' > changed.txt || true
 
-      - name: Dry-run queries (size:0)
+          if [ ! -s changed.txt ]; then
+            echo "No detection changes found — running all."
+            find detections -type f -name "*.yml" > changed.txt
+          fi
+
+          cat changed.txt
+
+      - name: Field validation against Elasticsearch
         run: |
-          python pipelines/dry_run_detection.py \
-            --detections-path detections \
-            --elasticsearch-url "$ELASTICSEARCH_URL" \
-            --username "$ELASTIC_USERNAME" \
-            --password "$ELASTIC_PASSWORD" \
-            --insecure "${ELASTIC_INSECURE:-false}" \
-            $([ "${{ github.event.inputs.all }}" = "true" ] && echo "--all")
+          while IFS= read -r rule; do
+            echo "Validating fields for $rule"
+
+            python pipelines/validate_fields.py \
+              --rule "$rule" \
+              --es-url "$ES_URL" \
+              --api-key "$API_KEY" \
+              --insecure \
+
+              --rule "$rule" \
+              --es-url "$ES_URL" \
+              --username "$ES_USERNAME" \
+              --password "$ES_PASSWORD" \
+              --insecure
+
+          done < changed.txt
+
+      - name: Dry-run detection queries
+        run: |
+          while IFS= read -r rule; do
+            echo "Dry run for $rule"
+
+            python pipelines/dry_run.py \
+              --rule "$rule" \
+              --es-url "$ES_URL" \
+              --username "$ES_USERNAME" \
+              --password "$ES_PASSWORD" \
+              --insecure
+
+          done < changed.txt
