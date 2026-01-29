@@ -15,6 +15,7 @@ jobs:
     runs-on: [self-hosted, cicd-runner-01]
 
     env:
+      API_KEY: ${{ secrets.ELASTIC_API_KEY }}
       ES_URL: ${{ secrets.ELASTICSEARCH_URL }}
       ES_USERNAME: ${{ secrets.ELASTIC_USERNAME }}
       ES_PASSWORD: ${{ secrets.ELASTIC_PASSWORD }}
@@ -54,12 +55,6 @@ jobs:
               --rule "$rule" \
               --es-url "$ES_URL" \
               --api-key "$API_KEY" \
-              --insecure \
-
-              --rule "$rule" \
-              --es-url "$ES_URL" \
-              --username "$ES_USERNAME" \
-              --password "$ES_PASSWORD" \
               --insecure
 
           done < changed.txt
